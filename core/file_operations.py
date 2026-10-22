@@ -3729,7 +3729,7 @@ class FileFilter:
                         tv_show_needed_episodes[show_name][season_num].add(episode_num)
                         continue
                 if media_type == "movie":
-                    media_name = self._extract_media_name(item)
+                    media_name = self._extract_media_name(item, known_movie=True)
                     if media_name:
                         needed_movies.add(media_name)
                     continue
@@ -3783,6 +3783,13 @@ class FileFilter:
         else:
             logging.debug(f"TV episode not needed (S{season_num:02d}E{episode_num:02d}): {show_name}")
             return False
+
+    def _cache_to_real_path(self, cache_path: str) -> Optional[str]:
+        """Real (array) path for a container cache path, or None if unmapped."""
+        if self.path_modifier:
+            real_path, _ = self.path_modifier.convert_cache_to_real(cache_path)
+            return real_path
+        return cache_path.replace(self.cache_dir, self.real_source, 1)
 
     def get_files_to_move_back_to_array(self, current_ondeck_items: Set[str],
                                        current_watchlist_items: Set[str],
@@ -3857,9 +3864,22 @@ class FileFilter:
                     logging.debug(f"Keeping pinned file in cache: {os.path.basename(cache_file)}")
                     continue
 
-                # Try stored metadata first for classification (check_path matches timestamp tracker keys)
+                # Real path for this cache file. The OnDeck/Watchlist sets and the
+                # OnDeck tracker are keyed by real paths, so a file still on
+                # someone's list is kept by exact path before any name matching
+                # (#232: movies in year folders, e.g. Film/2012/, were read as
+                # "Film, season 2012" by the folder-name fallback).
+                real_path = self._cache_to_real_path(check_path)
+                if real_path and (real_path in current_ondeck_items or real_path in current_watchlist_items):
+                    logging.debug(f"Still on OnDeck/Watchlist, keeping in cache: {os.path.basename(cache_file)}")
+                    continue
+
+                # Try stored metadata first for classification: real path first
+                # (OnDeck tracker, media_info_map), then the cache path
+                # (timestamp tracker keys)
                 tv_info = None
-                lookup = self._lookup_media_info(check_path)
+                media_type = None
+                lookup = (self._lookup_media_info(real_path) if real_path else None) or self._lookup_media_info(check_path)
                 if lookup:
                     media_type, ep_info = lookup
                     if media_type == "episode" and ep_info:
@@ -3870,7 +3890,7 @@ class FileFilter:
                             tv_info = (show, season, episode)
 
                 # Fallback to regex if no stored metadata
-                if tv_info is None:
+                if tv_info is None and media_type != "movie":
                     tv_info = self._extract_tv_info(cache_file)
 
                 # Determine if file should be kept
@@ -3880,7 +3900,7 @@ class FileFilter:
                         continue
                     media_name = show_name
                 else:
-                    media_name = self._extract_media_name(cache_file)
+                    media_name = self._extract_media_name(cache_file, known_movie=(media_type == "movie"))
                     if media_name is None:
                         logging.warning(f"Could not extract media name from path: {cache_file}")
                         continue
@@ -3918,14 +3938,11 @@ class FileFilter:
                     except OSError as e:
                         logging.debug(f"Could not check hard link count for {cache_file}: {e}")
 
-                # Move file back to array (use container path for path conversion)
-                if self.path_modifier:
-                    array_file, _ = self.path_modifier.convert_cache_to_real(check_path)
-                    if array_file is None:
-                        logging.warning(f"Could not convert cache path to array path: {cache_file}")
-                        continue
-                else:
-                    array_file = check_path.replace(self.cache_dir, self.real_source, 1)
+                # Move file back to array (real path computed from the container path above)
+                array_file = real_path
+                if array_file is None:
+                    logging.warning(f"Could not convert cache path to array path: {cache_file}")
+                    continue
 
                 display_name = self._extract_display_name(cache_file)
                 logging.debug(f"Media no longer needed, will move back to array: {display_name} - {cache_file}")
@@ -4064,7 +4081,7 @@ class FileFilter:
         except Exception:
             return None
 
-    def _extract_media_name(self, file_path: str) -> Optional[str]:
+    def _extract_media_name(self, file_path: str, known_movie: bool = False) -> Optional[str]:
         """
         Extract a comparable media identifier from a file path.
         - For TV shows: returns show name (episode comparison handled separately).
@@ -4079,13 +4096,17 @@ class FileFilter:
         artwork/NFO/subtitle siblings in lockstep so they share an identifier
         and the 'still needed in OnDeck' lookup matches for all of them, not
         just the primary video.
+
+        known_movie: Plex metadata says this is a movie, so skip the TV folder
+        check. Otherwise a numbers-only folder (Film/2012/...) reads as a
+        season and every movie in those folders shares the name "Film".
         """
         try:
             normalized_path = os.path.normpath(file_path)
             path_parts = normalized_path.split(os.sep)
 
             # Check if this is a TV show
-            for i, part in enumerate(path_parts):
+            for i, part in enumerate([] if known_movie else path_parts):
                 if (
                     re.match(r'^(Season|Series)\s*\d+', part, re.IGNORECASE)
                     or re.match(r'^\d+$', part)

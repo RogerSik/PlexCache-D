@@ -3500,6 +3500,19 @@ class PlexCacheApp:
                 current_pinned_cache_paths=self.pinned_paths_cache,
             )
 
+            # Anything this run is keeping on cache (OnDeck, Watchlist, pinned and
+            # their sidecars) stays put. filter_files() would skip it later anyway,
+            # but by then it had been counted as a restore and reported as a
+            # failed move every run (#232). The two lists are index-aligned.
+            active = set(self.all_active_media)
+            if active and files_to_move_back:
+                keep = [f in active for f in files_to_move_back]
+                if any(keep):
+                    for f in (f for f, k in zip(files_to_move_back, keep) if k):
+                        logging.debug(f"Still needed this run, not moving back: {os.path.basename(f)}")
+                    move_back_exclude_paths = [p for p, k in zip(move_back_exclude_paths, keep) if not k]
+                    files_to_move_back = [f for f, k in zip(files_to_move_back, keep) if not k]
+
             if files_to_move_back:
                 logging.debug(f"Found {len(files_to_move_back)} files to move back to array")
                 self.media_to_array.extend(files_to_move_back)
