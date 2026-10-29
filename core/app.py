@@ -29,6 +29,7 @@ from core.config import ConfigManager
 from core.logging_config import LoggingManager, reset_warning_error_flag
 from core.system_utils import SystemDetector, FileUtils, SingleInstanceLock, get_disk_usage, get_array_direct_path, detect_zfs, set_zfs_prefixes, format_bytes, create_dir_with_ownership, check_cache_share_alignment, cleanup_empty_parent_folders, resolve_cache_boundary, sweep_empty_folders
 from core.plex_api import PlexManager, OnDeckItem
+from core.jellyfin_api import JellyfinManager
 from core.file_operations import MultiPathModifier, SiblingFileFinder, FileFilter, FileMover, PlexcachedRestorer, CacheTimestampTracker, WatchlistTracker, OnDeckTracker, CachePriorityManager, PlexcachedMigration, get_media_identity, find_matching_plexcached, is_directory_level_file, is_video_file, save_json_atomically
 from core.pinned_media import PinnedMediaTracker, resolve_pins_to_paths
 
@@ -63,6 +64,7 @@ class PlexCacheApp:
         # Will be initialized after config loading
         self.logging_manager = None
         self.plex_manager = None
+        self.jellyfin_manager = None
         self.file_path_modifier = None
         self.sibling_finder = None
         self.file_filter = None
@@ -574,6 +576,21 @@ class PlexCacheApp:
             watchlist_enabled=self.config_manager.cache.watchlist_toggle
         )
 
+    def _init_jellyfin_manager(self) -> None:
+        """Initialize the optional Jellyfin OnDeck source."""
+        jellyfin = self.config_manager.jellyfin
+        if not jellyfin.enabled:
+            return
+        if not jellyfin.path_mappings:
+            logging.warning("[JELLYFIN] jellyfin_path_mappings is empty — no Jellyfin item will match a library")
+        logging.info(f"[JELLYFIN] Additional OnDeck source enabled: {jellyfin.url}")
+        self.jellyfin_manager = JellyfinManager(
+            url=jellyfin.url,
+            api_key=jellyfin.api_key,
+            path_mappings=jellyfin.path_mappings,
+            skip_users=jellyfin.skip_users,
+        )
+
     def _init_path_modifier(self) -> None:
         """Initialize path modifier and subtitle finder."""
         logging.debug("Initializing file operation components...")
@@ -840,6 +857,7 @@ class PlexCacheApp:
 
         # Initialize Plex manager
         self._init_plex_manager()
+        self._init_jellyfin_manager()
 
         # Initialize path modifier and subtitle finder
         self._init_path_modifier()
@@ -1060,8 +1078,16 @@ class PlexCacheApp:
                 logging.error(f"Failed to save new users to settings: {e}")
 
     def _check_active_sessions(self) -> None:
-        """Check for active Plex sessions."""
+        """Check for active Plex and Jellyfin sessions."""
         sessions = self.plex_manager.get_active_sessions()
+        jellyfin_paths = self.jellyfin_manager.get_active_session_paths() if self.jellyfin_manager else []
+        if jellyfin_paths:
+            if self.config_manager.exit_if_active_session:
+                logging.warning('There is an active Jellyfin session. Exiting...')
+                sys.exit('There is an active Jellyfin session. Exiting...')
+            for real_path in self.file_path_modifier.modify_file_paths(jellyfin_paths):
+                logging.debug(f"Skipping active Jellyfin session file: {real_path}")
+                self.files_to_skip.append(real_path)
         if sessions:
             if self.config_manager.exit_if_active_session:
                 logging.warning('There is an active session. Exiting...')
@@ -1167,6 +1193,14 @@ class PlexCacheApp:
             per_user_days=self.config_manager.plex.per_user_ondeck_days,
             prefetch_minimum_minutes=self.config_manager.cache.prefetch_minimum_minutes
         )
+        if self.jellyfin_manager:
+            jellyfin_items = self.jellyfin_manager.get_on_deck_media(
+                self.config_manager.plex.days_to_monitor,
+                self.config_manager.plex.number_episodes,
+                prefetch_minimum_minutes=self.config_manager.cache.prefetch_minimum_minutes
+            )
+            logging.info(f"[FETCH] Jellyfin OnDeck: {len(jellyfin_items)} items")
+            ondeck_items_list.extend(jellyfin_items)
 
         # Extract just the file paths for path modification
         ondeck_files = [item.file_path for item in ondeck_items_list]
@@ -1347,6 +1381,9 @@ class PlexCacheApp:
         if self.config_manager.cache.watched_move:
             if not self.plex_manager.is_ondeck_data_complete():
                 logging.warning("Skipping array restore - OnDeck data incomplete (Plex server unreachable)")
+                logging.warning("Files will remain on cache until next successful run")
+            elif self.jellyfin_manager and not self.jellyfin_manager.is_ondeck_data_complete():
+                logging.warning("Skipping array restore - Jellyfin OnDeck data incomplete (Jellyfin unreachable)")
                 logging.warning("Files will remain on cache until next successful run")
             elif (self.config_manager.cache.watchlist_toggle
                     and not self.plex_manager.is_watchlist_data_complete()):

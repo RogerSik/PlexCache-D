@@ -8,7 +8,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from core.system_utils import parse_size_bytes
 
 # Get the directory where config.py is located
@@ -127,6 +127,24 @@ class PlexConfig:
             self.skip_watchlist = []
         if self.users is None:
             self.users = []
+
+
+@dataclass
+class JellyfinConfig:
+    """Optional Jellyfin server as an additional OnDeck source.
+
+    Enabled when both url and api_key are set. path_mappings translate
+    Jellyfin paths into Plex paths, e.g. {"/media/": "/mnt/user/plex-media/"},
+    so the regular path_mappings apply unchanged.
+    """
+    url: str = ""
+    api_key: str = ""
+    path_mappings: Dict[str, str] = field(default_factory=dict)
+    skip_users: List[str] = field(default_factory=list)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url and self.api_key)
 
 
 @dataclass
@@ -385,6 +403,7 @@ class ConfigManager:
         self.notification = NotificationConfig()
         self.paths = PathConfig()
         self.plex = PlexConfig()
+        self.jellyfin = JellyfinConfig()
         self.cache = CacheConfig()
         self.performance = PerformanceConfig()
         self.logging = LoggingConfig()
@@ -448,6 +467,7 @@ class ConfigManager:
     def _load_all_configs(self) -> None:
         """Load all configuration sections."""
         self._load_plex_config()
+        self._load_jellyfin_config()
         self._load_cache_config()
         self._load_path_config()
         self._load_performance_config()
@@ -500,6 +520,23 @@ class ConfigManager:
         self.plex.per_user_ondeck_days = per_user_ondeck_days or None
         self.plex.per_user_watchlist_days = per_user_watchlist_days or None
     
+    def _load_jellyfin_config(self) -> None:
+        """Load optional Jellyfin settings. Env vars win so the API key can stay out of the settings file."""
+        self.jellyfin.url = os.environ.get('JELLYFIN_URL') or self.settings_data.get('jellyfin_url', '')
+        self.jellyfin.api_key = os.environ.get('JELLYFIN_API_KEY') or self.settings_data.get('jellyfin_api_key', '')
+        self.jellyfin.path_mappings = self.settings_data.get('jellyfin_path_mappings', {}) or {}
+        self.jellyfin.skip_users = self.settings_data.get('jellyfin_skip_users', []) or []
+        # JELLYFIN_PATH_MAPPINGS is a JSON object, JELLYFIN_SKIP_USERS a comma-separated list
+        env_mappings = os.environ.get('JELLYFIN_PATH_MAPPINGS')
+        if env_mappings:
+            try:
+                self.jellyfin.path_mappings = json.loads(env_mappings)
+            except json.JSONDecodeError as e:
+                logging.error(f"Invalid JSON in JELLYFIN_PATH_MAPPINGS: {e}")
+        env_skip_users = os.environ.get('JELLYFIN_SKIP_USERS')
+        if env_skip_users:
+            self.jellyfin.skip_users = [u.strip() for u in env_skip_users.split(',') if u.strip()]
+
     def _validate_eviction_settings(self) -> None:
         """Range-check the eviction trio, and flag a threshold that cannot act.
 

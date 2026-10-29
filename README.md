@@ -324,6 +324,21 @@ python3 plexcache.py
 
 For additional help, check the [Wiki](https://github.com/StudioNirin/PlexCache-D/wiki) for detailed guides. If something doesn't make sense or doesn't work, please open a new issue. But don't be upset if the answer is in the Wiki and we mock you for not reading it thoroughly first.
 
+## Jellyfin (optional)
+
+Jellyfin can be added as a second OnDeck source next to Plex, for setups where both servers share the same media. Every enabled Jellyfin user's *Continue Watching* and *Next Up* (plus the next `number_episodes` episodes) are cached like Plex OnDeck items, and files playing on Jellyfin are skipped. There is no Jellyfin watchlist. Plex stays required.
+
+Enabled when URL and API key are set (Jellyfin Dashboard → API Keys). Env vars override the settings file:
+
+| Env var | Settings key | Example |
+|---|---|---|
+| `JELLYFIN_URL` | `jellyfin_url` | `http://jellyfin:8096` |
+| `JELLYFIN_API_KEY` | `jellyfin_api_key` | |
+| `JELLYFIN_PATH_MAPPINGS` (JSON) | `jellyfin_path_mappings` | `{"/media/": "/mnt/user/plex-media/"}` |
+| `JELLYFIN_SKIP_USERS` (comma-separated) | `jellyfin_skip_users` | `guest,kid` |
+
+`jellyfin_path_mappings` translates the paths Jellyfin reports into the paths Plex reports, so the regular path mappings apply. Items without a matching prefix are ignored. If Jellyfin can't be read, moving files back to the array is skipped for that run.
+
 ## Notes
 
 This script might be compatible with other systems, especially Linux-based ones, although I have primarily tested it on Unraid with plex as docker container. While I cannot support every case, it's worth checking the GitHub issues to see if your specific case has already been discussed. Particularly worth checking the original Bexem repo issues page.
