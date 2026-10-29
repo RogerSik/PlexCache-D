@@ -1211,7 +1211,8 @@ class PlexManager:
                     rating_key=movie_rating_key or None
                 ))
     
-    def _get_next_episodes(self, episodes: List[Episode], current_season: int,
+    @staticmethod
+    def _get_next_episodes(episodes: List[Episode], current_season: int,
                           current_episode_index: int, number_episodes: int,
                           prefetch_minimum_minutes: int = 0) -> List[Episode]:
         """Get the next episodes after the current one.
