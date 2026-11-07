@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ class WebCacheService:
         self._refresh_thread: Optional[threading.Thread] = None
         self._stop_refresh = threading.Event()
         self._refresh_callbacks: Dict[str, Callable] = {}
+        # Run at the start of each background cycle, before the cached views
+        # are recomputed, so they reflect what the hook changed.
+        self._pre_refresh_hooks: List[Callable[[], Any]] = []
         self._disk_cache_file = DATA_DIR / "web_ui_cache.json"
 
         # Load from disk on init
@@ -133,6 +136,10 @@ class WebCacheService:
         """
         self._refresh_callbacks[key] = callback
 
+    def register_pre_refresh_hook(self, hook: Callable[[], Any]):
+        """Register a function to run at the start of every background cycle."""
+        self._pre_refresh_hooks.append(hook)
+
     def refresh(self, key: str) -> Any:
         """
         Force refresh a specific cache key using its registered callback.
@@ -160,6 +167,11 @@ class WebCacheService:
         https://github.com/StudioNirin/PlexCache-R/issues/136.
         """
         start = time.monotonic()
+        for hook in self._pre_refresh_hooks:
+            try:
+                hook()
+            except Exception as e:
+                logger.error("Error in pre-refresh hook %s: %s", getattr(hook, "__name__", hook), e)
         for key in self._refresh_callbacks:
             self.refresh(key)
         elapsed = time.monotonic() - start
@@ -394,6 +406,10 @@ def init_web_cache():
     def refresh_maintenance_health():
         """Refresh maintenance health summary"""
         return maintenance_svc.get_health_summary()
+
+    # Self-heal stale tracking entries before the health views are rebuilt,
+    # so warnings for deleted/replaced media clear on their own.
+    service.register_pre_refresh_hook(maintenance_svc.auto_heal_stale_entries)
 
     service.register_refresh_callback(CACHE_KEY_DASHBOARD_STATS, _compute_dashboard_stats)
     service.register_refresh_callback(CACHE_KEY_MAINTENANCE_AUDIT, refresh_maintenance_audit)

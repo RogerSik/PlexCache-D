@@ -269,6 +269,14 @@ _INDEX: List[Dict[str, Any]] = [
         "keywords": ["upgrade", "sonarr", "radarr", "transfer", "tracking", "rating key", "quality"],
     },
     {
+        "tab": "cache", "setting_id": "auto_heal_tracking",
+        "label": "Auto-Clean Stale Tracking Entries",
+        "hint": "Remove exclude list and timestamp entries for media deleted or replaced outside PlexCache, without waiting for the next run.",
+        "section": "Cache", "subsection": "File Handling",
+        "icon": "refresh-cw", "tone": "tone-info",
+        "keywords": ["stale", "exclude", "timestamps", "cleanup", "health", "warnings", "self-heal", "tracking"],
+    },
+    {
         "tab": "cache", "setting_id": "backup_upgraded_files",
         "label": "Backup Upgraded Files",
         "hint": "Create a .plexcached backup of the new file when a cached file is upgraded (only if the old file had a backup).",

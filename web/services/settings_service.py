@@ -618,6 +618,7 @@ class SettingsService:
             "remote_watchlist_rss_url": raw.get("remote_watchlist_rss_url", ""),
             # Upgrade tracking
             "auto_transfer_upgrades": raw.get("auto_transfer_upgrades", True),
+            "auto_heal_tracking": raw.get("auto_heal_tracking", True),
             "backup_upgraded_files": raw.get("backup_upgraded_files", True),
             # Scanning
             "excluded_folders": raw.get("excluded_folders", []),
@@ -667,6 +668,7 @@ class SettingsService:
             "remote_watchlist_rss_url": ("remote_watchlist_rss_url", str),
             # Upgrade tracking
             "auto_transfer_upgrades": ("auto_transfer_upgrades", lambda x: x == "on" or x is True),
+            "auto_heal_tracking": ("auto_heal_tracking", lambda x: x == "on" or x is True),
             "backup_upgraded_files": ("backup_upgraded_files", lambda x: x == "on" or x is True),
             # Advanced settings
             "max_concurrent_moves_array": ("max_concurrent_moves_array", safe_int),
@@ -677,7 +679,7 @@ class SettingsService:
         # Boolean fields that come from checkboxes (absent = unchecked = False)
         boolean_fields = {
             "watchlist_toggle", "watched_move", "create_plexcached_backups",
-            "cleanup_empty_folders", "use_symlinks", "auto_transfer_upgrades",
+            "cleanup_empty_folders", "use_symlinks", "auto_transfer_upgrades", "auto_heal_tracking",
             "backup_upgraded_files", "remote_watchlist_toggle", "exit_if_active_session",
             "check_hardlinks_on_restore"
         }
