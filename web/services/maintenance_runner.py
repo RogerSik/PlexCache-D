@@ -70,6 +70,7 @@ ACTION_HISTORY_LABELS = {
     "delete-extensionless": "Delete Extensionless",
     "evict-files": "Evict from Cache",
     "cache-pinned": "Cache Pinned",
+    "auto-heal-tracking": "Auto-Clean Tracking",
 }
 
 
@@ -98,7 +99,7 @@ class MaintenanceHistoryEntry:
     errors: List[str] = field(default_factory=list)
     error_count: int = 0
     affected_files: List[str] = field(default_factory=list)
-    source: str = "async"   # "async" or "sync"
+    source: str = "async"   # "async", "sync" or "auto" (background auto-heal)
     message: str = ""       # ActionResult summary message
 
     def to_dict(self) -> dict:

@@ -55,7 +55,7 @@
             Untracked
         </div>
         <div class="stat-value">{{ results.untracked_files|length }}</div>
-        <div class="stat-label">{% if results.untracked_files|length == 0 %}all tracked{% else %}not managed{% endif %}</div>
+        <div class="stat-label">{% if results.untracked_files|length == 0 %}all tracked{% elif results.untracked_needs_decision_count > 0 %}{{ results.untracked_needs_decision_count }} need a decision{% else %}new downloads{% endif %}</div>
     </div>
 
     <div class="stat-card {% if results.orphaned_plexcached|length > 20 %}stat-card-danger{% elif results.orphaned_plexcached|length > 0 %}stat-card-warning{% else %}stat-card-success{% endif %}">
@@ -113,9 +113,19 @@
         <i data-lucide="eye"></i>
         <h2>Untracked Files ({{ results.untracked_files|length }}{% if results.grouped_untracked|length != results.untracked_files|length %} in {{ results.grouped_untracked|length }} groups{% endif %})</h2>
     </div>
+    {% set needs_decision = results.untracked_needs_decision_count %}
+    {% set new_downloads = results.untracked_new_download_count %}
     <div class="card-body" style="padding: 0.75rem;">
         <p class="text-muted" style="margin: 0 0 0.75rem 0;">
-            These files are on cache but not managed by PlexCache. {% if is_unraid %}The Unraid mover will handle them normally.{% else %}They will not be automatically moved.{% endif %} Use the actions below to decide what happens to them:
+            These files are on cache but not managed by PlexCache.
+            {% if new_downloads %}
+            <strong>{{ new_downloads }}</strong> {{ 'is a new download' if new_downloads == 1 else 'are new downloads' }} with no copy on the array.
+            {% set them = 'it' if new_downloads == 1 else 'them' %}{% if is_unraid %}The Unraid mover moves {{ them }} on its own schedule (with Mover Tuning, possibly only once the cache passes its threshold) &mdash; nothing to do.{% else %}{{ them|capitalize }} {{ 'stays' if new_downloads == 1 else 'stay' }} on cache until you move {{ them }}.{% endif %}
+            {% endif %}
+            {% if needs_decision %}
+            <strong>{{ needs_decision }}</strong> also {{ 'has' if needs_decision == 1 else 'have' }} a backup or copy on the array and {{ 'needs' if needs_decision == 1 else 'need' }} a decision &mdash; {{ 'it is' if needs_decision == 1 else 'they are' }} listed first.
+            {% endif %}
+            Select files to keep them on cache or move them to the array.
         </p>
         <!-- Bulk Actions -->
         <div id="untracked-bulk-actions" style="display: none; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin-bottom: 0;">
@@ -132,7 +142,11 @@
             <div style="font-size: 1rem; line-height: 1.3;"><span class="text-muted">Selected:</span> <strong id="untracked-selected-count">0</strong><span id="untracked-selected-size" style="font-weight: 600;"></span></div>
         </div>
     </div>
-    <div class="card-body" style="padding: 0;">
+    <details class="card-body untracked-details" style="padding: 0;"{% if needs_decision %} open{% endif %}>
+        <summary class="untracked-summary">
+            <i data-lucide="chevron-right" class="untracked-summary-chevron"></i>
+            {% if needs_decision %}Show all {{ results.untracked_files|length }} files{% else %}Show {{ results.untracked_files|length }} new download{{ 's' if results.untracked_files|length != 1 }}{% endif %}
+        </summary>
         <div class="table-container" style="max-height: 400px; overflow-y: auto;">
             <table id="untracked-table">
                 <thead>
@@ -157,7 +171,7 @@
                     {% set file = group.primary %}
                     {% set children = group.children %}
                     {% set group_size = file.size + children|sum(attribute='size') if children else file.size %}
-                    <tr data-filename="{{ file.filename|lower }}" data-size="{{ group_size }}" data-file-size="{{ file.size }}" data-age="{{ file.age_days }}" data-has-backup="{{ file.has_plexcached_backup|lower }}" data-has-dup="{{ file.has_array_duplicate|lower }}"{% if children %} class="untracked-group-row" onclick="toggleUntrackedGroup(this, event)" style="cursor: pointer;"{% endif %}>
+                    <tr data-filename="{{ file.filename|lower }}" data-size="{{ group_size }}" data-file-size="{{ file.size }}" data-age="{{ file.age_days }}" data-has-backup="{{ file.has_plexcached_backup|lower }}" data-has-dup="{{ file.has_array_duplicate|lower }}" data-needs-decision="{{ group.needs_decision|lower }}" class="{% if children %}untracked-group-row{% endif %}{% if group.needs_decision %} untracked-needs-decision{% endif %}"{% if children %} onclick="toggleUntrackedGroup(this, event)" style="cursor: pointer;"{% endif %}>
                         <td>
                             <input type="checkbox" class="untracked-checkbox" value="{{ file.cache_path }}" onchange="toggleUntrackedFile(this){% if children %}; toggleGroupCheckbox(this){% endif %}" data-has-backup="{{ file.has_plexcached_backup|lower }}" data-has-dup="{{ file.has_array_duplicate|lower }}">
                         </td>
@@ -185,7 +199,7 @@
                             {% elif file.has_array_duplicate %}
                             <span class="badge badge-info" title="This file also exists on the array">Has copy</span>
                             {% else %}
-                            <span class="badge badge-warning" title="No copy exists on the array - only on cache">Cache only</span>
+                            <span class="badge badge-muted" title="No copy on the array yet — a new download the mover will relocate on its own schedule">Cache only</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -213,7 +227,7 @@
                             {% elif child.has_array_duplicate %}
                             <span class="badge badge-info" title="This file also exists on the array">Has copy</span>
                             {% else %}
-                            <span class="badge badge-warning" title="No copy exists on the array - only on cache">Cache only</span>
+                            <span class="badge badge-muted" title="No copy on the array yet — a new download the mover will relocate on its own schedule">Cache only</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -222,7 +236,7 @@
                 </tbody>
             </table>
         </div>
-    </div>
+    </details>
 </div>
 {% endif %}
 
@@ -715,6 +729,21 @@ th.sortable .sort-icon i {
     width: 14px;
     height: 14px;
 }
+
+/* Untracked: collapsible table, decision rows highlighted */
+.untracked-summary {
+    cursor: pointer;
+    padding: 0.5rem 0.75rem;
+    color: var(--text-muted);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.untracked-summary::-webkit-details-marker { display: none; }
+.untracked-summary-chevron { width: 14px; height: 14px; transition: transform 0.15s; }
+.untracked-details[open] .untracked-summary-chevron { transform: rotate(90deg); }
+.untracked-needs-decision td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
 
 /* Untracked file grouping */
 .untracked-child-row {

@@ -210,6 +210,15 @@
                 <div class="form-hint">When Sonarr/Radarr upgrades a cached file, automatically transfer exclude list and tracker entries to the new file using Plex rating keys.</div>
             </div>
 
+            <div class="form-group" data-setting-id="auto_heal_tracking">
+                <label class="switch">
+                    <input type="checkbox" name="auto_heal_tracking"
+                           {% if settings.auto_heal_tracking | default(true) %}checked{% endif %}>
+                    <span>Auto-Clean Stale Tracking Entries</span>
+                </label>
+                <div class="form-hint">When cached media is deleted or replaced outside PlexCache, remove its exclude list and timestamp entries automatically after 30 minutes instead of waiting for the next run. Skipped while a run is active or when the cache looks unmounted.</div>
+            </div>
+
             <div class="form-group" data-setting-id="backup_upgraded_files">
                 <label class="switch">
                     <input type="checkbox" name="backup_upgraded_files"

@@ -54,6 +54,18 @@ class UntrackedFile:
     age_days: float = 0.0
     has_invalid_timestamp: bool = False  # True if file has future date or very old date
 
+    @property
+    def needs_decision(self) -> bool:
+        """True when the cache copy collides with something on the array.
+
+        A cache-only untracked file is just a fresh download the Unraid mover
+        will relocate on its own schedule — nothing to decide. One with a
+        .plexcached backup or an array duplicate is two copies of the same
+        media that disagree about where it lives; that is what the user
+        actually has to resolve.
+        """
+        return self.has_plexcached_backup or self.has_array_duplicate
+
 
 @dataclass
 class OrphanedBackup:
@@ -144,6 +156,16 @@ class AuditResults:
             self.health_status = "healthy"
 
     @property
+    def untracked_needs_decision_count(self) -> int:
+        """Untracked files that also exist on the array (backup or copy)."""
+        return sum(1 for f in self.untracked_files if f.needs_decision)
+
+    @property
+    def untracked_new_download_count(self) -> int:
+        """Untracked cache-only files — fresh downloads waiting for the mover."""
+        return len(self.untracked_files) - self.untracked_needs_decision_count
+
+    @property
     def total_issues(self) -> int:
         """Count of issues needing attention (excludes untracked files which are informational)"""
         return (len(self.orphaned_plexcached) +
@@ -194,6 +216,17 @@ class _ByteProgressAggregator:
 class MaintenanceService:
     """Service for cache auditing and maintenance actions"""
 
+    # Auto-heal of stale tracking entries (see auto_heal_stale_entries).
+    # Grace period: long enough for Plex to scan a Sonarr/Radarr upgrade so
+    # the audit's upgrade detection can transfer the entry first, short
+    # enough that the dashboard is clean again well before the next run.
+    AUTO_HEAL_GRACE_SECONDS = 30 * 60
+    # Mass-disappearance brake: if more than this share of a tracking file
+    # is stale at once (and more than AUTO_HEAL_GUARD_MIN entries), assume
+    # a mount problem rather than real deletions and leave it alone.
+    AUTO_HEAL_MAX_STALE_RATIO = 0.5
+    AUTO_HEAL_GUARD_MIN = 20
+
     # Chunk size for copy progress reporting (4 MB)
     _COPY_CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -206,6 +239,11 @@ class MaintenanceService:
         self._array_dirs: List[str] = []
         self._settings: Dict = {}
         self._settings_mtime: Optional[float] = None
+        # Auto-heal: when each currently-stale entry was first seen stale
+        # (time.monotonic()). An entry is only removed once it has stayed
+        # stale for AUTO_HEAL_GRACE_SECONDS, see auto_heal_stale_entries().
+        self._auto_heal_lock = threading.Lock()
+        self._auto_heal_first_seen: Dict[str, Dict[str, float]] = {"exclude": {}, "timestamps": {}}
 
     def _load_settings(self) -> Dict:
         """Load settings from plexcache_settings.json.
@@ -595,6 +633,13 @@ class MaintenanceService:
                 for f in dir_files:
                     result.append({"primary": f, "children": [], "total_size_display": f.size_display, "folder": None})
 
+        for group in result:
+            group["needs_decision"] = group["primary"].needs_decision or any(
+                c.needs_decision for c in group["children"]
+            )
+        # Groups that need a decision first; sort() is stable, so the
+        # filename order within each half is kept.
+        result.sort(key=lambda g: not g["needs_decision"])
         return result
 
     def _check_plexcached_backup(self, cache_file: str) -> tuple:
@@ -2271,13 +2316,10 @@ class MaintenanceService:
             )
 
         try:
-            # Keep only entries that still exist on cache
-            valid_entries = exclude_files & cache_files
-            with open(self.exclude_file, 'w', encoding='utf-8') as f:
-                for path in sorted(valid_entries):
-                    # Translate container paths back to host paths for Unraid mover
-                    host_path = self._translate_container_to_host_path(path)
-                    f.write(host_path + '\n')
+            # Remove only the stale lines. Rewriting the file from
+            # ``exclude_files & cache_files`` used to also drop the pinned
+            # entries the filter above deliberately kept.
+            self._remove_exclude_entries(stale)
 
             return ActionResult(
                 success=True,
@@ -2335,6 +2377,189 @@ class MaintenanceService:
                 message=f"Error updating timestamps file: {str(e)}",
                 errors=[str(e)]
             )
+
+    def _remove_exclude_entries(self, container_paths: Set[str]) -> int:
+        """Drop the given entries from the exclude list in one atomic rewrite.
+
+        Matches on the container-form path of each line, so host/container
+        spelling does not matter. Every other line is kept verbatim and in
+        order. Returns the number of lines removed.
+        """
+        if not container_paths or not self.exclude_file.exists():
+            return 0
+        with open(self.exclude_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        kept = [
+            line for line in lines
+            if not line.strip()
+            or self._translate_host_to_container_path(line.strip()) not in container_paths
+        ]
+        removed = len(lines) - len(kept)
+        if removed:
+            tmp = self.exclude_file.with_name(self.exclude_file.name + ".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.writelines(kept)
+            os.replace(tmp, self.exclude_file)
+        return removed
+
+    def _remove_timestamp_entries(self, paths: Set[str]) -> int:
+        """Drop the given keys from timestamps.json in one atomic rewrite."""
+        if not paths or not self.timestamps_file.exists():
+            return 0
+        with open(self.timestamps_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        removed = 0
+        for path in paths:
+            if path in data:
+                del data[path]
+                removed += 1
+        if removed:
+            tmp = self.timestamps_file.with_name(self.timestamps_file.name + ".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.timestamps_file)
+        return removed
+
+    def auto_heal_stale_entries(self, now: Optional[float] = None) -> Dict[str, int]:
+        """Remove exclude/timestamp entries whose file has been gone for a while.
+
+        Called from the 5-minute background refresh. Without it, stale entries
+        (media deleted or replaced outside PlexCache) only disappear at the
+        start of the next PlexCache run, so the dashboard shows tracking
+        warnings for up to a day that nobody needs to act on. Dropping an
+        entry for a file that does not exist is harmless: the mover cannot
+        move a file that is not there.
+
+        Safety rails, any of which makes this a no-op for the cycle:
+        - the ``auto_heal_tracking`` setting is off;
+        - a PlexCache run or maintenance action is in progress (files in flux);
+        - a configured cache directory is missing, or the cache scan is empty
+          (unmounted pool would make *everything* look stale);
+        - more than AUTO_HEAL_MAX_STALE_RATIO of a file's entries are stale.
+        Pinned and released paths are never touched, and an entry is only
+        removed after it has stayed stale for AUTO_HEAL_GRACE_SECONDS, which
+        also gives the audit's upgrade detection time to transfer it first.
+
+        Returns ``{"exclude": n, "timestamps": m}`` — entries removed.
+        """
+        removed = {"exclude": 0, "timestamps": 0}
+        now = time.monotonic() if now is None else now
+
+        with self._auto_heal_lock:
+            if not self._load_settings().get('auto_heal_tracking', True):
+                self._auto_heal_first_seen = {"exclude": {}, "timestamps": {}}
+                return removed
+
+            try:
+                from web.services import get_operation_runner, get_maintenance_runner
+                if get_operation_runner().is_running or get_maintenance_runner().is_running:
+                    # Files are being moved right now; whatever looks stale
+                    # may be mid-flight. Start the grace period over.
+                    self._auto_heal_first_seen = {"exclude": {}, "timestamps": {}}
+                    return removed
+            except Exception as e:
+                logging.debug(f"Auto-heal: could not check runner state, skipping: {e}")
+                return removed
+
+            cache_dirs, _ = self._get_paths()
+            if not cache_dirs or not all(os.path.isdir(d) for d in cache_dirs):
+                logging.debug("Auto-heal: cache directory missing, skipping")
+                return removed
+            cache_files = self.get_cache_files()
+            if not cache_files:
+                logging.debug("Auto-heal: cache scan returned no files, skipping")
+                return removed
+
+            protected = self._get_pinned_cache_paths() | self.get_released_files()
+            tracked = {
+                "exclude": self.get_exclude_files(),
+                "timestamps": self.get_timestamp_files(),
+            }
+
+            due: Dict[str, Set[str]] = {}
+            for kind, entries in tracked.items():
+                stale = entries - cache_files - protected
+                if (len(stale) > self.AUTO_HEAL_GUARD_MIN
+                        and len(stale) > len(entries) * self.AUTO_HEAL_MAX_STALE_RATIO):
+                    logging.warning(
+                        "Auto-heal: %d of %d %s entries are stale at once — "
+                        "looks like a mount problem, not deletions. Leaving them "
+                        "for the next run or a manual cleanup.",
+                        len(stale), len(entries), kind,
+                    )
+                    self._auto_heal_first_seen[kind] = {}
+                    continue
+                previous = self._auto_heal_first_seen[kind]
+                first_seen = {p: previous.get(p, now) for p in stale}
+                self._auto_heal_first_seen[kind] = first_seen
+                due[kind] = {
+                    p for p, t in first_seen.items()
+                    if now - t >= self.AUTO_HEAL_GRACE_SECONDS
+                }
+
+            started_at = datetime.now()
+            errors: List[str] = []
+            removed_paths: List[str] = []
+            for kind, paths in due.items():
+                if not paths:
+                    continue
+                try:
+                    if kind == "exclude":
+                        removed[kind] = self._remove_exclude_entries(paths)
+                    else:
+                        removed[kind] = self._remove_timestamp_entries(paths)
+                    removed_paths.extend(sorted(paths))
+                    for p in paths:
+                        self._auto_heal_first_seen[kind].pop(p, None)
+                except (IOError, OSError, json.JSONDecodeError) as e:
+                    errors.append(f"{kind}: {e}")
+                    logging.warning(f"Auto-heal: could not update {kind} entries: {e}")
+
+        if removed["exclude"] or removed["timestamps"] or errors:
+            logging.info(
+                "[AUTO-HEAL] Removed %d stale exclude and %d stale timestamp entries "
+                "(files no longer on cache)",
+                removed["exclude"], removed["timestamps"],
+            )
+            self._record_auto_heal(started_at, removed, removed_paths, errors)
+        return removed
+
+    def _record_auto_heal(self, started_at: datetime, removed: Dict[str, int],
+                          removed_paths: List[str], errors: List[str]) -> None:
+        """Log an auto-heal pass in the maintenance history so it is visible."""
+        try:
+            import uuid
+            from core.system_utils import format_duration
+            from web.services import get_maintenance_history
+            from web.services.maintenance_runner import (
+                ACTION_HISTORY_LABELS, MaintenanceHistoryEntry,
+            )
+            completed_at = datetime.now()
+            duration = (completed_at - started_at).total_seconds()
+            total = removed["exclude"] + removed["timestamps"]
+            get_maintenance_history().record(MaintenanceHistoryEntry(
+                id=str(uuid.uuid4()),
+                action_name="auto-heal-tracking",
+                action_display=ACTION_HISTORY_LABELS.get("auto-heal-tracking", "Auto-Clean Tracking"),
+                timestamp=started_at.isoformat(),
+                completed_at=completed_at.isoformat(),
+                duration_seconds=round(duration, 1),
+                duration_display=format_duration(duration),
+                file_count=total,
+                affected_count=total,
+                success=not errors,
+                was_stopped=False,
+                errors=errors[:20],
+                error_count=len(errors),
+                affected_files=[os.path.basename(p) for p in removed_paths[:25]],
+                source="auto",
+                message=(
+                    f"Removed {removed['exclude']} stale exclude and "
+                    f"{removed['timestamps']} stale timestamp entries"
+                ),
+            ))
+        except Exception as e:
+            logging.debug(f"Auto-heal: could not record history entry: {e}")
 
     def fix_file_timestamps(self, paths: List[str], dry_run: bool = True) -> ActionResult:
         """Fix invalid file timestamps by setting mtime to current time"""
